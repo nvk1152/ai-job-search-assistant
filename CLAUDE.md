@@ -12,6 +12,9 @@ ai-job-search-assistant is an **agentic job-application copilot**. A user pastes
 résumé; a Claude-driven agent orchestrates MCP servers to: parse the JD, pull the user's *real*
 experience, research the company from the web, and produce **drafts** — a tailored résumé, a cover
 letter, a fit-gap analysis, and interview talking points. Applications are tracked on a Kanban board.
+The agent host and guardrail-critical generation run on **Claude**; cheap, high-volume steps (extraction,
+embeddings, company research) run on **Google Gemini**'s free-tier Developer API, selected by a
+config-driven `ModelRouter` (§3a). Routing is a cost choice, never a safety one (§6).
 
 **The whole value proposition is grounding/safety**: the agent may only *reframe* real experience
 (never invent it), and company claims must be cited from search. Treat the guardrails in §6 as the
@@ -44,6 +47,11 @@ read the tree.
    tenant-isolation suites (§7) are mandatory, not optional.
 7. **Push back when I'm wrong.** If a request has a flaw or a better approach exists, say so with
    reasoning before complying.
+8. **Route models through `ModelRouter`; never hardcode model IDs.** Each step resolves its model from
+   config by `LlmTask` (§3a). **Guardrail-critical generation — tailored résumé, cover letter, fit-gap,
+   and the tool-calling agent loop — must stay on Claude**; cheap high-volume steps (extraction,
+   embeddings, research) use Gemini's free tier. Moving a guardrail-critical task off Claude is a design
+   error (§6).
 
 ---
 
@@ -56,15 +64,41 @@ don't change **major/minor** without asking me.
 | ---------------- | -------------------------------------------------------------------------------------- |
 | Language / build | **Java 25 (LTS)**, **Gradle 9.x** multi-module (Java 25 toolchain; daemon may run JDK 21+) |
 | Framework        | **Spring Boot 4.1.x** (Spring Framework 7, Jakarta EE 11, first-class Java 25). **Do NOT use 3.5.x — OSS EOL 2026-06-30.** |
-| AI               | **Spring AI 2.0.x** — `spring-ai-starter-model-anthropic` (official Anthropic Java SDK under the hood). Requires Spring Boot 4 as a hard dependency. |
+| AI               | **Spring AI 2.0.x** — `spring-ai-starter-model-anthropic` (official Anthropic Java SDK) **+** `spring-ai-starter-model-google-genai` (Gemini). Requires Spring Boot 4 as a hard dependency. |
 | MCP              | `spring-ai-starter-mcp-client` (orchestrator) + `spring-ai-starter-mcp-server-webmvc` (servers). MCP Java SDK 2.0.0. Prefer **Streamable HTTP** transport (SSE is being phased out). |
-| Model            | **Claude Sonnet (latest)** for tailoring/generation; **Claude Haiku (latest)** for résumé/JD extraction. **Do not hardcode model IDs** — resolve from config; confirm current IDs in the Anthropic console. |
-| Web research     | web-search MCP server wrapping Brave Search / Tavily (API key via config). Claude's native web-search tool is a fallback option. |
-| Persistence      | **PostgreSQL + pgvector** (profile embeddings, JD matching, audit). Postgres **row-level security** for tenancy. Migrations via **Flyway**. |
-| Doc parsing      | Apache **PDFBox / Tika** to extract text from uploaded résumés; Claude structures it into the schema. |
+| Model            | **Routed by `ModelRouter` (§3a).** Claude Sonnet — agent host + guardrail-critical generation; Claude Haiku — extraction fallback; Gemini 2.5 Flash-Lite — extraction; Gemini 2.5 Flash — research summaries; `gemini-embedding-001` — embeddings. **Do not hardcode model IDs** — resolve from config; confirm current IDs in each provider's console. |
+| Web research     | web-search MCP server wrapping Brave Search / Tavily (API key via config); `company_brief` summaries composed by Gemini 2.5 Flash (§3a). Native web-search grounding is a fallback option. |
+| Persistence      | **PostgreSQL + pgvector** (profile embeddings via `gemini-embedding-001`, JD matching, audit). Postgres **row-level security** for tenancy. Migrations via **Flyway**. |
+| Doc parsing      | Apache **PDFBox / Tika** to extract text from uploaded résumés; the extraction model (Gemini 2.5 Flash-Lite, Haiku fallback) structures it into the schema. |
 | Frontend         | **React + TypeScript + Vite**, Tailwind; Kanban via **dnd-kit**; Monaco/rich-text for doc editing. Separate build under `frontend/`. |
 | Auth             | **Google OIDC only** → app-issued short-lived JWT. Roles carried as a JWT claim; feature access resolved **server-side per request** (§6a). |
 | Ops              | Docker, Docker Compose (local Postgres), Helm chart, deploy to OpenShift. CI via GitHub Actions. |
+
+---
+
+## 3a. Model routing (Claude + Gemini) — verify starter coords against the 2.0 reference
+
+Two providers, one router. Cheap high-volume work → Gemini free tier; guardrail-critical work → Claude.
+
+| `LlmTask` | Model | Notes |
+| --------- | ----- | ----- |
+| `EXTRACTION` | Gemini 2.5 Flash-Lite (→ Haiku fallback) | résumé/JD parsing to JSON |
+| `EMBEDDING` | `gemini-embedding-001` | Anthropic has no embeddings API |
+| `RESEARCH_SUMMARY` | Gemini 2.5 Flash | `company_brief` |
+| `GENERATION` | **Claude Sonnet** | fit-gap, tailored résumé, cover letter (guardrail-critical) |
+| `AGENT` | **Claude Sonnet** | tool-calling loop |
+
+- **Billing (demo) = free Gemini Developer API, api-key only.** Set **only**
+  `spring.ai.google.genai.api-key`. Setting `project-id`/`location` silently switches to **paid Vertex** —
+  don't, unless you mean to (that same switch is the later production upgrade). Pin 2.5+ IDs; Gemini
+  1.x/2.0 IDs are shut down.
+- **`ModelRouter` is the single place model choice lives:** `LlmTask` → qualified `ChatClient` bean.
+  Multiple providers coexist via `spring.ai.model.chat` + qualified beans. **Never hardcode model IDs**
+  (config only). Log every routed call to `llm_call_audit` (task, provider, model, tokens).
+- **Guardrail-critical stays on Claude** — `GENERATION` and `AGENT` never resolve to a Gemini model (§6).
+- **Resilience:** extraction falls back Gemini → Haiku on error/rate-limit; retry-with-back-off both
+  providers. Only the research server makes a model call among the MCP servers; the profile server is
+  pure data.
 
 ---
 
@@ -96,6 +130,9 @@ Known breaking points (all verified for 2.0.x):
   directly — don't reimplement it.
 - Enable the MCP annotation scanner in config (`spring.ai.mcp.server.annotation-scanner.enabled`);
   a `@Component` with annotated methods is enough — no manual `ToolCallback` bean wiring.
+- **Google GenAI starter has two modes** — free Gemini Developer API (api-key only) vs paid Vertex
+  (`project-id`/`location`); mixing them yields confusing 400 auth errors. Multiple providers coexist via
+  `spring.ai.model.chat` + qualified beans. See §3a.
 
 Reference docs (fetch these rather than relying on memory):
 `https://docs.spring.io/spring-ai/reference/` and the 2.0 upgrade notes.
@@ -167,6 +204,9 @@ These are the product's differentiators. Treat any change that weakens one as a 
 6. **Server-side feature enforcement.** A hidden frontend button is UX, not security. Every gated
    endpoint and every gated MCP tool registration re-checks the flag server-side (§6a). Roles come from
    the DB-backed identity, are stamped into the JWT at login, and are **never** accepted from client input.
+7. **Guardrail-critical generation stays on Claude.** Model routing (§3a) is a cost optimization, not a
+   safety lever. Extraction, embeddings, and research summaries may run on Gemini; the no-fabrication
+   generation and the tool-calling agent loop run on Claude. Weakening this is a design error.
 
 ### 6a. Role-based feature flags (progressive rollout)
 
@@ -216,8 +256,9 @@ phase. Full detail is in `docs/PROJECT.md` §6.
 - **Phase 0 — Foundations.** Gradle multi-module skeleton, Java 25 toolchain, `common` DTOs, base
   orchestrator + one empty MCP server, health endpoints, Postgres (Compose) + Flyway, CI.
   *Done when:* `./gradlew build` green, services start, CI passes.
-- **Phase 1 — Profile domain + résumé import.** Profile CRUD + React editor; upload résumé →
-  PDFBox/Tika text → **first `ChatClient` call** structures it (no MCP yet).
+- **Phase 1 — Profile domain + résumé import.** Profile CRUD + React editor; wire **both** model
+  providers + the `ModelRouter` (§3a); upload résumé → PDFBox/Tika text → **first model call** structures
+  it (extraction on Gemini 2.5 Flash-Lite, Haiku fallback; no MCP yet).
 - **Phase 2 — JD intake + parsing** into `parsed_requirements`.
 - **Phase 3 — `mcp-profile-server`** (`get_profile`, `search_experience`, tenant-scoped, pgvector) +
   fit-gap analysis via MCP.
@@ -245,7 +286,9 @@ phase. Full detail is in `docs/PROJECT.md` §6.
   `user_id` + RLS. No raw string SQL concatenation — parameterize.
 - **Frontend:** TypeScript strict mode, functional components + hooks, no `any` without a comment
   justifying it.
-- **Config:** everything environment-specific via Spring config / env vars. `.env` git-ignored.
+- **Config:** everything environment-specific via Spring config / env vars. `.env` git-ignored. Model
+  IDs and the `LlmTask`→model map are config, never hardcoded; both provider API keys (Anthropic +
+  Gemini) come from env, never committed.
 - **Commits/PRs:** describe the "why," call out any guardrail-adjacent change explicitly.
 
 ---

@@ -37,3 +37,8 @@ out/
 ### VS Code ###
 .vscode/
 /.gradle/
+
+### Frontend (Node/Vite) ###
+frontend/node_modules/
+frontend/dist/
+frontend/*.tsbuildinfo

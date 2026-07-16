@@ -7,6 +7,20 @@ spring:
     password: ${DB_PASSWORD}
   flyway:
     locations: classpath:db/migration
+  servlet:
+    multipart:
+      max-file-size: 10MB
+      max-request-size: 10MB
+  ai:
+    anthropic:
+      api-key: ${ANTHROPIC_API_KEY:}
+      chat:
+        model: claude-sonnet-5
+    google:
+      genai:
+        api-key: ${GEMINI_API_KEY:}
+        chat:
+          model: gemini-2.5-flash-lite
 
 server:
   port: ${SERVER_PORT:8080}
@@ -16,3 +30,25 @@ management:
     web:
       exposure:
         include: health,info
+
+app:
+  demo-user-id: 00000000-0000-0000-0000-000000000001
+  llm:
+    routing:
+      extraction:
+        primary-provider: google-genai
+        primary-model: gemini-2.5-flash-lite
+        fallback-provider: anthropic
+        fallback-model: claude-haiku-4-5-20251001
+      embedding:
+        provider: google-genai
+        model: gemini-embedding-001
+      research-summary:
+        provider: google-genai
+        model: gemini-2.5-flash
+      generation:
+        provider: anthropic
+        model: claude-sonnet-5
+      agent:
+        provider: anthropic
+        model: claude-sonnet-5
