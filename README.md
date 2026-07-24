@@ -134,7 +134,7 @@ git clone https://github.com/nvk1152/ai-job-search-assistant.git
 cd ai-job-search-assistant
 
 # Copy environment template
-cp .env.example .env
+cp .env
 
 # Edit .env with your API keys (see section below)
 # macOS/Linux:
@@ -182,7 +182,7 @@ npm run dev
 
 ## Environment Setup
 
-Create `.env` in the project root (copy from `.env.example`):
+Create `.env` in the project root:
 
 ```bash
 # Database
